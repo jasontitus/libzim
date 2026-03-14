@@ -32,6 +32,7 @@
 #include <map>
 #include <fstream>
 #include <thread>
+#include <condition_variable>
 #include "config.h"
 
 #include "../fileheader.h"
@@ -107,6 +108,8 @@ namespace zim
         mutable std::mutex m_exceptionLock;
         std::exception_ptr m_exceptionSlot;
         std::atomic<bool> m_errored;
+        std::mutex m_clusterClosedMutex;
+        std::condition_variable m_clusterClosedCV;
         const Compression compression;
         std::string zimName;
         std::string tmpFileName;

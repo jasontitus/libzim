@@ -23,8 +23,8 @@
 #define MAX_QUEUE_SIZE 10
 
 #include <mutex>
+#include <condition_variable>
 #include <queue>
-#include "../tools.h"
 
 template<typename T>
 class Queue {
@@ -36,10 +36,14 @@ class Queue {
         virtual void pushToQueue(const T& element);
         virtual bool getHead(T &element);
         virtual bool popFromQueue(T &element);
+        virtual void waitAndPop(T &element);
+        void notifyWaiters();
 
-    protected:
-        std::queue<T>   m_realQueue;
-        std::mutex      m_queueMutex;
+    public:
+        std::queue<T>               m_realQueue;
+        std::mutex                  m_queueMutex;
+        std::condition_variable     m_pushCV;
+        std::condition_variable     m_popCV;
 
     private:
         // Make this queue non copyable
@@ -61,17 +65,12 @@ size_t Queue<T>::size() {
 
 template<typename T>
 void Queue<T>::pushToQueue(const T &element) {
-    unsigned int wait = 0;
-    unsigned int queueSize = 0;
-
-    do {
-        zim::microsleep(wait);
-        queueSize = size();
-        wait += 10;
-    } while (queueSize > MAX_QUEUE_SIZE);
-
-    std::lock_guard<std::mutex> l(m_queueMutex);
-    m_realQueue.push(element);
+    {
+        std::unique_lock<std::mutex> l(m_queueMutex);
+        m_popCV.wait(l, [this]{ return m_realQueue.size() <= MAX_QUEUE_SIZE; });
+        m_realQueue.push(element);
+    }
+    m_pushCV.notify_one();
 }
 
 template<typename T>
@@ -86,15 +85,34 @@ bool Queue<T>::getHead(T &element) {
 
 template<typename T>
 bool Queue<T>::popFromQueue(T &element) {
-    std::lock_guard<std::mutex> l(m_queueMutex);
-    if (m_realQueue.empty()) {
-        return false;
+    {
+        std::lock_guard<std::mutex> l(m_queueMutex);
+        if (m_realQueue.empty()) {
+            return false;
+        }
+
+        element = m_realQueue.front();
+        m_realQueue.pop();
     }
+    m_popCV.notify_one();
+    return true;
+}
 
-    element = m_realQueue.front();
-    m_realQueue.pop();
+template<typename T>
+void Queue<T>::waitAndPop(T &element) {
+    {
+        std::unique_lock<std::mutex> l(m_queueMutex);
+        m_pushCV.wait(l, [this]{ return !m_realQueue.empty(); });
+        element = m_realQueue.front();
+        m_realQueue.pop();
+    }
+    m_popCV.notify_one();
+}
 
-  return true;
+template<typename T>
+void Queue<T>::notifyWaiters() {
+    m_pushCV.notify_all();
+    m_popCV.notify_all();
 }
 
 #endif // OPENZIM_LIBZIM_QUEUE_H

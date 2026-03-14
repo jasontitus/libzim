@@ -492,10 +492,16 @@ namespace zim
 
     void CreatorData::addError(const std::exception_ptr exception)
     {
-      std::lock_guard<std::mutex> l(m_exceptionLock);
-      if (!m_exceptionSlot) {
-        m_exceptionSlot = exception;
+      {
+        std::lock_guard<std::mutex> l(m_exceptionLock);
+        if (!m_exceptionSlot) {
+          m_exceptionSlot = exception;
+        }
       }
+      // Wake up any threads that might be blocked waiting on CVs
+      m_clusterClosedCV.notify_all();
+      taskList.notifyWaiters();
+      clusterToWrite.notifyWaiters();
     }
 
     bool CreatorData::isErrored() const
@@ -523,6 +529,7 @@ namespace zim
       // Wait for writerThread to finish.
       if (writerThread.joinable()) {
         clusterToWrite.pushToQueue(nullptr);
+        m_clusterClosedCV.notify_one();
         writerThread.join();
       }
     }

@@ -21,8 +21,6 @@
 #include "cluster.h"
 #include "creatordata.h"
 
-#include "../tools.h"
-
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -36,19 +34,26 @@ namespace zim
 
     void* taskRunner(void* arg) {
       auto creatorData = static_cast<zim::writer::CreatorData*>(arg);
-      unsigned int wait = 0;
       try {
-        while(!creatorData->isErrored()) {
+        while(true) {
           std::shared_ptr<Task> task;
-          microsleep(wait);
-          wait += 100;
-          if (creatorData->taskList.popFromQueue(task)) {
-            if (!task) {
+          {
+            auto& q = creatorData->taskList;
+            std::unique_lock<std::mutex> lock(q.m_queueMutex);
+            q.m_pushCV.wait(lock, [&]() {
+              return !q.m_realQueue.empty() || creatorData->isErrored();
+            });
+            if (creatorData->isErrored()) {
               return nullptr;
             }
-            task->run(creatorData);
-            wait = 0;
+            task = q.m_realQueue.front();
+            q.m_realQueue.pop();
           }
+          creatorData->taskList.m_popCV.notify_one();
+          if (!task) {
+            return nullptr;
+          }
+          task->run(creatorData);
         }
       } catch (...) {
         creatorData->addError(std::current_exception());
@@ -59,25 +64,26 @@ namespace zim
     void* clusterWriter(void* arg) {
       auto creatorData = static_cast<zim::writer::CreatorData*>(arg);
       Cluster* cluster;
-      unsigned int wait = 0;
       try {
-        while(!creatorData->isErrored()) {
-          microsleep(wait);
-          wait += 100;
-          if(creatorData->clusterToWrite.getHead(cluster)) {
-            if (cluster == nullptr) {
-              // All cluster writen, we can quit
-              return nullptr;
-            }
-            if (not cluster->isClosed()) {
-              continue;
-            }
-            creatorData->clusterToWrite.popFromQueue(cluster);
-            cluster->setOffset(offset_t(lseek(creatorData->out_fd, 0, SEEK_CUR)));
-            cluster->write(creatorData->out_fd);
-            cluster->clear_data();
-            wait = 0;
+        while(true) {
+          {
+            std::unique_lock<std::mutex> lock(creatorData->m_clusterClosedMutex);
+            creatorData->m_clusterClosedCV.wait(lock, [&]() {
+              return creatorData->isErrored()
+                  || (creatorData->clusterToWrite.getHead(cluster)
+                      && (cluster == nullptr || cluster->isClosed()));
+            });
           }
+          if (creatorData->isErrored()) {
+            return nullptr;
+          }
+          if (cluster == nullptr) {
+            return nullptr;
+          }
+          creatorData->clusterToWrite.popFromQueue(cluster);
+          cluster->setOffset(offset_t(lseek(creatorData->out_fd, 0, SEEK_CUR)));
+          cluster->write(creatorData->out_fd);
+          cluster->clear_data();
         }
       } catch(...) {
         creatorData->addError(std::current_exception());

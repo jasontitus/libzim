@@ -20,8 +20,11 @@
 #ifndef OPENZIM_LIBZIM_WORKERS_H
 #define OPENZIM_LIBZIM_WORKERS_H
 
-#include "tools.h"
 #include "creatordata.h"
+
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 namespace zim {
 namespace writer {
@@ -40,21 +43,31 @@ class TrackableTask: public Task {
     TrackableTask(const TrackableTask&) = delete;
     TrackableTask& operator=(const TrackableTask&) = delete;
     TrackableTask() { ++waitingTaskCount; }
-    virtual ~TrackableTask() { --waitingTaskCount;}
+    virtual ~TrackableTask() {
+      if (--waitingTaskCount == 0) {
+        std::lock_guard<std::mutex> lock(taskCountMutex());
+        taskCountCV().notify_all();
+      }
+    }
 
     static void waitNoMoreTask(const CreatorData* data) {
-      // Wait for all tasks has been done
-      // If we are in error state, threads have been stopped and waitingTaskCount
-      // will never reach 0, so no need to wait.
-      unsigned int wait = 0;
-      do {
-        microsleep(wait);
-        wait += 10;
-      } while(waitingTaskCount.load() > 0 && !data->isErrored());
+      std::unique_lock<std::mutex> lock(taskCountMutex());
+      taskCountCV().wait(lock, [data]() {
+        return waitingTaskCount.load() == 0 || data->isErrored();
+      });
     }
 
   private:
     static std::atomic<unsigned long> waitingTaskCount;
+
+    static std::mutex& taskCountMutex() {
+      static std::mutex m;
+      return m;
+    }
+    static std::condition_variable& taskCountCV() {
+      static std::condition_variable cv;
+      return cv;
+    }
 };
 
 template<class T>

@@ -28,6 +28,7 @@ namespace zim
 
     void ClusterTask::run(CreatorData* data) {
       cluster->close();
+      data->m_clusterClosedCV.notify_one();
     };
 
   }
