@@ -33,3 +33,7 @@ test-driver
 test/zimlib-test*
 test/test-suite.log
 .clangd
+subprojects/.wraplock
+subprojects/googletest-*/
+subprojects/zstd-*/
+subprojects/packagecache/
